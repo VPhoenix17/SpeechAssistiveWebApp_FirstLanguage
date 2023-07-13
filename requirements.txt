@@ -1,0 +1,5 @@
+streamlit
+streamlit-on-Hover-tabs
+nvidia-riva-client
+pyaudio
+numpy
