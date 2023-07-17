@@ -14,8 +14,14 @@ import riva.client.proto.riva_asr_pb2 as rasr
 import streamlit as st
 import wave
 from pydub import AudioSegment
-import streamlit_ace as st_ace
+# import streamlit_ace as st_ace
 
+# Grammar imports
+from happytransformer import HappyTextToText, TTSettings
+happy_tt = HappyTextToText("T5", "vennify/t5-base-grammar-correction")
+args = TTSettings(num_beams=1, min_length=1)
+
+#suggestion generator imports
 import torch
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
@@ -28,8 +34,6 @@ model.to(device)
 
 from st_on_hover_tabs import on_hover_tabs
 
-#For OFFLINE ASR the only WAV file accepted and it should be of specific format. Run below command to convert any files
-#ffmpeg -i recording.wav -acodec pcm_s16le -ac 1 -ar 16000 recording_upd.wav
 
 #DO NOT CHANGE THIS VALUE
 uri = "ec2-54-236-5-236.compute-1.amazonaws.com:50051"
@@ -99,6 +103,7 @@ def generate_completions(input_text, max_length=20, num_completions=5):
     return completions
 
 
+
 PRINT_STREAMING_ADDITIONAL_INFO_MODES = ['no', 'time', 'confidence']
 textReturned = ''
 
@@ -113,7 +118,7 @@ def print_streaming(
     show_intermediate: bool = False,
     file_mode: str = 'w',
 ):
-    global textReturned 
+    global textReturned
      
     if additional_info not in PRINT_STREAMING_ADDITIONAL_INFO_MODES:
         raise ValueError(
@@ -161,7 +166,9 @@ def print_streaming(
                             for i, alternative in enumerate(result.alternatives):                                
                                 textReturned+=(f'(alternative {i + 1})' if i > 0 else '') + f' {alternative.transcript}'  
                             print('###########'+textReturned)
-                            st.markdown(f"**Text:** {textReturned}")                           
+                            st.markdown(f"**Text:** {textReturned}")
+                            with open("OnlineASR_file.txt", "a") as f:
+                                f.write(textReturned + "\n")  # Append intermediate transcript to the file                          
                             textReturned=''                            
                     else:
                         partial_transcript += transcript
@@ -290,24 +297,8 @@ if tabs == 'Offline ASR':
         print(f'Time: {timeTaken}')
         st.markdown("##### ASR Transcript:   \n"
                     + asr_best_transcript)
-        st.audio(converted_bytes, format="audio/wav")
         
-                            
-elif tabs == 'Text To Speech':
-    input_text = st.text_area(
-    label="Enter text to convert...",
-    value="",
-    height=200)
-
-    if input_text:
-        completions = generate_completions(input_text)
-        if completions:
-            st.markdown('### Suggestions:')
-            for completion in completions:
-                st.markdown(f'- {completion}')
-
-    if st.button('Convert to audio'):
-        req["text"] = input_text
+        req["text"] = asr_best_transcript
         resp = riva_tts.synthesize(**req)
         
         obj = wave.open('myaudiofile.wav','wb')
@@ -318,7 +309,51 @@ elif tabs == 'Text To Speech':
         obj.close()
         
         audio_file = open('myaudiofile.wav', 'rb')
+        st.markdown("##### ASR Audio:   \n")
         st.audio( audio_file, format="audio/wav")
+        st.markdown("##### Listen Again:   \n")
+        st.audio(converted_bytes, format="audio/wav")
+        
+    
+        
+elif tabs == 'Text To Speech':
+    input_text = st.text_area(
+        label="Enter text to convert...",
+        value="",
+        height=200
+    )
+    
+    # Perform grammar correction using the happy_tt.generate_text() function
+    result = happy_tt.generate_text(input_text, args=args)
+    corrected_text = result.text
+    st.text('Corrected Text: '+corrected_text)
+    
+    # Add a checkbox for the user to choose whether to use the corrected text
+    use_corrected_text = st.checkbox("Use corrected text ", value=False)
+    if use_corrected_text:
+        input_text = corrected_text
+    
+    if st.button('Convert to audio'):
+        req["text"] = input_text  # Use either original or corrected text for TTS
+        resp = riva_tts.synthesize(**req)
+        
+        obj = wave.open('myaudiofile.wav','wb')
+        obj.setnchannels(1) # mono
+        obj.setsampwidth(2)
+        obj.setframerate(44100)
+        obj.writeframes(resp.audio)
+        obj.close()
+        
+        audio_file = open('myaudiofile.wav', 'rb')
+        st.audio(audio_file, format="audio/wav")
+    
+    if st.button("Get Suggestions"):
+        completions = generate_completions(input_text)
+        if completions:
+            st.markdown('### Suggestions:')
+            for completion in completions:
+                st.markdown(f'- {completion}')
+
 
 elif tabs == 'Streaming ASR':
     st.header("Streaming ASR Demo")
@@ -368,6 +403,33 @@ elif tabs == 'Streaming ASR':
                 show_intermediate=False,
                 additional_info = 'no',
             )
+
+    # Display the concatenated paragraph
+    if stop_exec:
+        st.markdown("### Transcription:")
+        final_transcription = ""
+        with open("OnlineASR_file.txt", "r") as f:
+            final_transcription = f.read()  # Read the contents of the file
+
+        st.markdown(final_transcription)  # Display the final transcript
+        
+        req["text"] = final_transcription
+        resp = riva_tts.synthesize(**req)
+        
+        obj = wave.open('myaudiofile.wav','wb')
+        obj.setnchannels(1) # mono
+        obj.setsampwidth(2)
+        obj.setframerate(44100)
+        obj.writeframes(resp.audio)
+        obj.close()
+        
+        audio_file = open('myaudiofile.wav', 'rb')
+        st.markdown("##### ASR Audio:   \n")
+        st.audio( audio_file, format="audio/wav")
+        
+        # Clear the file to prepare it for the next streaming session
+        with open("OnlineASR_file.txt", "w") as f:
+            f.write("")  # Clear the contents of the file
     
        
 
