@@ -2,6 +2,9 @@
 
 FROM python:3.9-slim
 
+# Set the environment variable to increase the maximum message size
+ENV GRPC_MAX_MESSAGE_LENGTH=8001766
+
 EXPOSE 8501
 
 WORKDIR /app

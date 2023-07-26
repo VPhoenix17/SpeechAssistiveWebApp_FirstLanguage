@@ -4,6 +4,7 @@ import base64
 import sys
 import time
 import warnings
+import string
 from copy import deepcopy
 from pathlib import Path
 from typing import (Iterable, List, Optional,
@@ -17,18 +18,18 @@ from pydub import AudioSegment
 # import streamlit_ace as st_ace
 
 # Grammar imports
-from happytransformer import HappyTextToText, TTSettings
-happy_tt = HappyTextToText("T5", "vennify/t5-base-grammar-correction")
-args = TTSettings(num_beams=1, min_length=1)
+from gramformer import Gramformer
 
-#suggestion generator imports
+
+#Suggestion Generator Imports
 import torch
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import BertTokenizer, BertForMaskedLM, top_k_top_p_filtering, logging
+logging.set_verbosity_error()
+#Bert Variables Declaration
+no_words_to_be_predicted = globals()
+select_model = globals()
+enter_input_text = globals()
 
-tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-model = GPT2LMHeadModel.from_pretrained('gpt2')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model.to(device)
 
 
 
@@ -36,7 +37,7 @@ from st_on_hover_tabs import on_hover_tabs
 
 
 #DO NOT CHANGE THIS VALUE
-uri = "ec2-54-236-5-236.compute-1.amazonaws.com:50051"
+uri = "ec2-3-208-22-219.compute-1.amazonaws.com:50051"
 
 lang="en-US"
 
@@ -85,22 +86,6 @@ riva.client.add_word_boosting_to_config(offline_config, ["ABLooper"], 10)
 # boost_lm_score = 4.0
 # riva.client.add_word_boosting_to_config(offline_config, speech_hints, boost_lm_score)
 
-#text completion suggestions generator
-def generate_completions(input_text, max_length=20, num_completions=5):
-    input_ids = tokenizer.encode(input_text, return_tensors='pt').to(device)
-    output = model.generate(
-        input_ids,
-        max_length=max_length + len(input_ids[0]),
-        num_return_sequences=num_completions,
-        pad_token_id=tokenizer.eos_token_id,
-        do_sample=True,
-        temperature=0.7,
-        top_k=50,
-        top_p=0.95,
-        early_stopping=True
-    )
-    completions = [tokenizer.decode(ids, skip_special_tokens=True) for ids in output]
-    return completions
 
 
 
@@ -108,8 +93,86 @@ PRINT_STREAMING_ADDITIONAL_INFO_MODES = ['no', 'time', 'confidence']
 textReturned = ''
 
 
+# Grammar Correction
+def set_seed(seed):
+  torch.manual_seed(seed)
+  if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
 
-#print streaming
+set_seed(1212)
+gf = Gramformer(models = 1, use_gpu=False) # 1=corrector, 2=detector
+
+
+# DEFINE FUNCTIONS FOR BERT NEXTB WORD PREDICTION MODEL
+def set_model_config(**kwargs):
+  for key, value in kwargs.items():
+    print("{0} = {1}".format(key, value))
+  
+  no_words_to_be_predicted = list(kwargs.values())[0] # integer values
+  select_model = list(kwargs.values())[1] # possible values = 'bert' or 'gpt' or 'xlnet'
+  enter_input_text = list(kwargs.values())[2] #only string
+
+  return no_words_to_be_predicted, select_model, enter_input_text
+
+
+def load_model(model_name):
+  try:
+    if model_name.lower() == "bert":
+      bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+      bert_model = BertForMaskedLM.from_pretrained('bert-base-uncased').eval()
+      return bert_tokenizer,bert_model
+    else:
+        print("tf?")
+  except Exception as e:
+    pass
+
+
+def get_all_predictions(text_sentence,  model_name, top_clean=5):
+  if model_name.lower() == "bert":
+    # ========================= BERT =================================
+    input_ids, mask_idx = encode_bert(bert_tokenizer, text_sentence)
+    with torch.no_grad():
+      predict = bert_model(input_ids)[0]
+    bert = decode_bert(bert_tokenizer, predict[0, mask_idx, :].topk(no_words_to_be_predicted).indices.tolist(), top_clean)
+    return {'bert': bert}
+
+#BERT ENCODE AND DECODE
+# bert encode
+def encode_bert(tokenizer, text_sentence, add_special_tokens=True):
+  text_sentence = text_sentence.replace('<mask>', tokenizer.mask_token)
+  # if <mask> is the last token, append a "." so that models dont predict punctuation.
+  if tokenizer.mask_token == text_sentence.split()[-1]:
+    text_sentence += ' .'
+    input_ids = torch.tensor([tokenizer.encode(text_sentence, add_special_tokens=add_special_tokens)])
+    mask_idx = torch.where(input_ids == tokenizer.mask_token_id)[1].tolist()[0]
+  return input_ids, mask_idx
+  
+# bert decode
+def decode_bert(tokenizer, pred_idx, top_clean):
+  ignore_tokens = string.punctuation + '[PAD]'
+  tokens = []
+  for w in pred_idx:
+    token = ''.join(tokenizer.decode(w).split())
+    if token not in ignore_tokens:
+      tokens.append(token.replace('##', ''))
+  return '\n'.join(tokens[:top_clean])
+
+def get_prediction_end_of_sentence(input_text, model_name):
+  try:
+    if model_name.lower() == "bert":
+      input_text += ' <mask>'
+      print(input_text)
+      res = get_all_predictions(input_text, model_name, top_clean=int(no_words_to_be_predicted)) 
+      return res
+    else:
+        print("Tf2?")
+
+  except Exception as error:
+    pass
+
+
+
+# ================PRINT STREAMING=================================
 def print_streaming(
     responses: Iterable[rasr.StreamingRecognizeResponse],
     output_file: Optional[Union[Union[os.PathLike, str, TextIO], List[Union[os.PathLike, str, TextIO]]]] = None,
@@ -323,10 +386,12 @@ elif tabs == 'Text To Speech':
         height=200
     )
     
-    # Perform grammar correction using the happy_tt.generate_text() function
-    result = happy_tt.generate_text(input_text, args=args)
-    corrected_text = result.text
-    st.text('Corrected Text: '+corrected_text)
+    if input_text:
+        result = gf.correct(input_text, max_candidates=1)
+        result=list(result)
+        print(result[0])
+        corrected_text = result[0]
+        st.text('Corrected Text: '+corrected_text)
     
     # Add a checkbox for the user to choose whether to use the corrected text
     use_corrected_text = st.checkbox("Use corrected text ", value=False)
@@ -348,11 +413,26 @@ elif tabs == 'Text To Speech':
         st.audio(audio_file, format="audio/wav")
     
     if st.button("Get Suggestions"):
-        completions = generate_completions(input_text)
-        if completions:
-            st.markdown('### Suggestions:')
-            for completion in completions:
-                st.markdown(f'- {completion}')
+        try:
+            print("Next Word Prediction with Pytorch using BERT")
+            no_words_to_be_predicted, select_model, enter_input_text = set_model_config(no_words_to_be_predicted=5, select_model = "bert", enter_input_text = input_text)
+            if select_model.lower() == "bert":
+                bert_tokenizer, bert_model  = load_model(select_model)
+                res = get_prediction_end_of_sentence(enter_input_text, select_model)
+                answer_bert = []
+                print(res['bert'].split("\n"))
+                for i in res['bert'].split("\n"):
+                    answer_bert.append(i)
+                    answer_as_string_bert = "    ".join(answer_bert)
+        except Exception as e:
+            print('Some problem occured')
+            
+        suggestions=answer_bert
+
+        # Display the suggestions
+        st.text("Next word suggestions:")
+        for i, suggestion in enumerate(suggestions, 1):
+            st.write(f"{i}. {suggestion}")
 
 
 elif tabs == 'Streaming ASR':
