@@ -5,6 +5,8 @@ import sys
 import time
 import warnings
 import string
+import numpy as np
+import imageio
 from copy import deepcopy
 from pathlib import Path
 from typing import (Iterable, List, Optional,
@@ -14,14 +16,16 @@ import riva.client.audio_io
 import riva.client.proto.riva_asr_pb2 as rasr
 import streamlit as st
 import wave
+from streamlit_drawable_canvas import st_canvas
 from pydub import AudioSegment
 # import streamlit_ace as st_ace
+from st_on_hover_tabs import on_hover_tabs
 
-# Grammar imports
+# ===========Grammar imports=============
 from gramformer import Gramformer
 
 
-#Suggestion Generator Imports
+# =========Suggestion Generator Imports=============
 import torch
 from transformers import BertTokenizer, BertForMaskedLM, top_k_top_p_filtering, logging
 logging.set_verbosity_error()
@@ -31,12 +35,20 @@ select_model = globals()
 enter_input_text = globals()
 
 
+# # ===========Image Captioning Imports==============
+# import cv2
+# from PIL import Image
+# from transformers import CLIPProcessor, CLIPModel
+
+# # Load the CLIP model and processor
+# model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16")
+# processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
 
 
-from st_on_hover_tabs import on_hover_tabs
 
 
-#DO NOT CHANGE THIS VALUE
+# ==============ASR API===============
+# DO NOT CHANGE THIS VALUE
 uri = "ec2-3-208-22-219.compute-1.amazonaws.com:50051"
 
 lang="en-US"
@@ -93,7 +105,7 @@ PRINT_STREAMING_ADDITIONAL_INFO_MODES = ['no', 'time', 'confidence']
 textReturned = ''
 
 
-# Grammar Correction
+# ==========GRAMMAR CORRECTION==================================
 def set_seed(seed):
   torch.manual_seed(seed)
   if torch.cuda.is_available():
@@ -103,7 +115,7 @@ set_seed(1212)
 gf = Gramformer(models = 1, use_gpu=False) # 1=corrector, 2=detector
 
 
-# DEFINE FUNCTIONS FOR BERT NEXTB WORD PREDICTION MODEL
+# =====DEFINE FUNCTIONS FOR BERT NEXT WORD PREDICTION MODEL==========
 def set_model_config(**kwargs):
   for key, value in kwargs.items():
     print("{0} = {1}".format(key, value))
@@ -113,7 +125,6 @@ def set_model_config(**kwargs):
   enter_input_text = list(kwargs.values())[2] #only string
 
   return no_words_to_be_predicted, select_model, enter_input_text
-
 
 def load_model(model_name):
   try:
@@ -126,7 +137,6 @@ def load_model(model_name):
   except Exception as e:
     pass
 
-
 def get_all_predictions(text_sentence,  model_name, top_clean=5):
   if model_name.lower() == "bert":
     # ========================= BERT =================================
@@ -137,7 +147,7 @@ def get_all_predictions(text_sentence,  model_name, top_clean=5):
     return {'bert': bert}
 
 #BERT ENCODE AND DECODE
-# bert encode
+# BERT ENCODE
 def encode_bert(tokenizer, text_sentence, add_special_tokens=True):
   text_sentence = text_sentence.replace('<mask>', tokenizer.mask_token)
   # if <mask> is the last token, append a "." so that models dont predict punctuation.
@@ -147,7 +157,7 @@ def encode_bert(tokenizer, text_sentence, add_special_tokens=True):
     mask_idx = torch.where(input_ids == tokenizer.mask_token_id)[1].tolist()[0]
   return input_ids, mask_idx
   
-# bert decode
+# BERT DECODE
 def decode_bert(tokenizer, pred_idx, top_clean):
   ignore_tokens = string.punctuation + '[PAD]'
   tokens = []
@@ -280,6 +290,7 @@ def print_streaming(
             if fo:
                 elem.close()
 
+# ================FILE CONVERSION=================================
 def convert_to_wav(uploaded_file,output_file):
     # # Save the uploaded file as recording.wav
     # with open("recording.wav", "wb") as f:
@@ -298,11 +309,53 @@ def convert_to_wav(uploaded_file,output_file):
 
     return converted_bytes
 
+# ==============IMAGE CAPTIONING================================
+# Function to process the drawn image and generate captions
+# def process_image_and_generate_captions(image, num_captions=1):
+#     # Preprocess the image and convert it to a tensor
+#     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+#     image = Image.fromarray(image).convert("RGB")
+#     image = processor(images=image, return_tensors="pt")
 
+#     # Prepare text captions for CLIP model
+#     captions = [
+#         "A photo of a dog.",
+#         "A beautiful landscape.",
+#         "An abstract painting.",
+#     ]  # You can specify your own captions here
+
+#     text_inputs = processor(captions, return_tensors="pt", padding=True)
+
+#     # Generate captions using the CLIP model
+#     with torch.no_grad():
+#         outputs = model(
+#             pixel_values=image.pixel_values,
+#             attention_mask=image.attention_mask,
+#             text_input_ids=text_inputs.input_ids,
+#             text_attention_mask=text_inputs.attention_mask,
+#             return_dict=True,
+#         )
+
+#     # Get the logits for the captions
+#     logits_per_image = outputs.logits_per_image
+
+#     # Pick the top num_captions captions for the image
+#     _, indices = logits_per_image.topk(num_captions, dim=1)
+
+#     # Decode the indices to get the actual captions
+#     captions = [captions[index] for index in indices[0].tolist()]
+
+#     return captions
+
+# ===============STREAMLIT TABS=================================
 with st.sidebar:
-    tabs = on_hover_tabs(tabName=['Offline ASR', 'Streaming ASR', 'Text To Speech'], 
-                         iconName=['play_circle', 'record_voice_over','record_voice_over'], default_choice=0)
+    tabs = on_hover_tabs(tabName=['Offline ASR', 'Streaming ASR', 'Text To Speech','Drawboard'], 
+                         iconName=['play_circle', 'record_voice_over','record_voice_over','play_circle'], default_choice=0)
 
+
+# ====================MAIN==========================
+
+# ======================OFFLINE ASR=====================
 if tabs == 'Offline ASR':
     st.header("Offline ASR Demo")
     st.caption("Ensure the audio file is in WAV format")
@@ -377,9 +430,11 @@ if tabs == 'Offline ASR':
         st.markdown("##### Listen Again:   \n")
         st.audio(converted_bytes, format="audio/wav")
         
-    
+# ===================TEXT TO SPEECH====================
         
 elif tabs == 'Text To Speech':
+    st.header("Text To Speech Demo")
+    st.caption("Please Enter some input before using any of the buttons.")
     input_text = st.text_area(
         label="Enter text to convert...",
         value="",
@@ -394,6 +449,7 @@ elif tabs == 'Text To Speech':
         st.text('Corrected Text: '+corrected_text)
     
     # Add a checkbox for the user to choose whether to use the corrected text
+    st.caption("Select the checkbox below if you feel the corrected text above is better.")
     use_corrected_text = st.checkbox("Use corrected text ", value=False)
     if use_corrected_text:
         input_text = corrected_text
@@ -434,6 +490,7 @@ elif tabs == 'Text To Speech':
         for i, suggestion in enumerate(suggestions, 1):
             st.write(f"{i}. {suggestion}")
 
+# ====================STREAMING ASR=======================
 
 elif tabs == 'Streaming ASR':
     st.header("Streaming ASR Demo")
@@ -510,8 +567,40 @@ elif tabs == 'Streaming ASR':
         # Clear the file to prepare it for the next streaming session
         with open("OnlineASR_file.txt", "w") as f:
             f.write("")  # Clear the contents of the file
+ 
+# ==================DRAWBOARD=============================
     
-       
-
-
+elif tabs == 'Drawboard':
+    st.header("Drawboard Demo")
+    st.write("Draw your mind if you can't put it into words")
+    # Create a canvas for drawing
+    canvas_result= st_canvas(                                           #canvas_result = 
+        fill_color="#59a697",
+        stroke_width=10,
+        stroke_color="#000000",
+        background_color="#59a697",
+        width=800,
+        height=400,
+        drawing_mode="freedraw",
+        key="canvas",
+    )
+    
+    if st.button("Save"):
+        if canvas_result.image_data is not None:
+            imageio.imwrite("drawboard\drawn_image.png", canvas_result.image_data)
+            
+    
+    # # Generate captions when the "Get Caption" button is clicked
+    # if st.button("Get Caption"):
+    #     if canvas_result.image_data is not None:
+    #         image = canvas_result.image_data.astype("uint8")
+    #         num_captions = 3  # You can specify the number of captions you want
+    #         captions = process_image_and_generate_captions(image, num_captions)
+    #         st.subheader("Generated Captions:")
+    #         for i, caption in enumerate(captions, 1):
+    #             st.write(f"{i}. {caption}")
+    #     else:
+    #         st.warning("Please draw a picture first.")
+    
+    
 
